@@ -1,6 +1,6 @@
 {
-  "name": "Audit",
-  "short_name": "Audit",
+  "name": "QualiTrack",
+  "short_name": "QualiTrack",
   "start_url": "./login.html",
   "scope": "./",
   "display": "standalone",
