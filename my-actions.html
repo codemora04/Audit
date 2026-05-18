@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mes Actions Correctives</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" type="image/png" href="logo3.png">
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#0f172a">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.5.31/dist/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="./pwa.js"></script>
+</head>
+<body>
+  <div class="container" style="max-width:1100px;">
+
+    <!-- Header -->
+    <div class="ma-header">
+      <div class="ma-header-left">
+        <h1 class="ma-title">📋 Actions Correctives</h1>
+        <p class="ma-subtitle" id="ma-username-label">Chargement…</p>
+      </div>
+      <div class="ma-header-right">
+        <button id="ma-refresh-btn" class="btn-retour" style="padding:8px 18px;font-size:0.85rem;margin:0;">🔄 Actualiser</button>
+        <a href="accueil.html" class="btn-retour" style="padding:8px 18px;font-size:0.85rem;margin:0;">← Retour</a>
+      </div>
+    </div>
+
+    <!-- Stats Row -->
+    <div id="ma-stats-row" class="ma-stats-row"></div>
+
+    <!-- Filter Tabs -->
+    <div class="ma-tabs" id="ma-tabs">
+      <button class="ma-tab active" data-filter="all">Toutes</button>
+      <button class="ma-tab" data-filter="Open">Open</button>
+      <button class="ma-tab" data-filter="In Progress">En cours</button>
+      <button class="ma-tab" data-filter="Late">En retard</button>
+      <button class="ma-tab" data-filter="Closed">Clôturées</button>
+    </div>
+
+    <!-- Report buttons -->
+    <div class="ma-report-row">
+      <button id="ma-pdf-open-btn"   class="ma-report-btn ma-report-open">📄 PDF — Actions ouvertes</button>
+      <button id="ma-pdf-closed-btn" class="ma-report-btn ma-report-closed">📄 PDF — Actions clôturées</button>
+      <button id="ma-xls-btn"        class="ma-report-btn ma-report-excel">📊 Excel — Toutes</button>
+    </div>
+
+    <!-- Actions List -->
+    <div id="ma-list" class="ma-list">
+      <div class="ma-loading">Chargement des actions…</div>
+    </div>
+
+  </div>
+
+  <!-- Closure Modal -->
+  <div id="closure-modal" class="ca-modal-overlay" style="display:none;">
+    <div class="ca-modal">
+      <div class="ca-modal-header">
+        <h3>Clôturer l'action corrective</h3>
+        <button id="close-closure-modal" class="ca-modal-close">✕</button>
+      </div>
+      <div class="ca-modal-body">
+        <div class="ca-field-group">
+          <label class="ca-label">Date de clôture *</label>
+          <input type="date" id="closure-date" class="ca-input">
+        </div>
+        <div id="closure-modal-error" class="ca-modal-error" style="display:none;"></div>
+      </div>
+      <div class="ca-modal-footer">
+        <button id="closure-confirm-btn" class="ca-save-btn" type="button">✅ Confirmer la clôture</button>
+        <button id="close-closure-modal-2" class="ca-cancel-btn" type="button">Annuler</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { supabase }                          from "./supabase.js";
+    import { showLoading, hideLoading }          from "./utils.js";
+    import {
+      computeEffectiveStatus,
+      getStatusCfg,
+      loadMyCorrectiveActions,
+      loadAllCorrectiveActions,
+      updateCorrectiveActionStatus,
+    } from "./corrective-actions.js";
+
+    // ── AUTH & USER ──────────────────────────────────────────────────────────
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session) { window.location.href = "login.html"; }
+
+    const username = sessionStorage.getItem("audit_username");
+    const role     = sessionStorage.getItem("audit_user_role");
+    if (!username) { window.location.href = "accueil.html"; }
+
+    const isAuditor = role === "auditeur";
+    document.getElementById("ma-username-label").textContent =
+      isAuditor
+        ? `Vue complète — ${username} (auditeur)`
+        : `Mes actions — ${username}`;
+
+    // ── STATE ────────────────────────────────────────────────────────────────
+    let allActions  = [];
+    let activeFilter = "all";
+    let pendingClosureId = null;
+
+    // ── LOAD ─────────────────────────────────────────────────────────────────
+    async function loadActions() {
+      showLoading("Chargement des actions…");
+      try {
+        allActions = isAuditor
+          ? await loadAllCorrectiveActions()
+          : await loadMyCorrectiveActions(username);
+      } catch (e) {
+        alert("Erreur chargement : " + e.message);
+      } finally {
+        hideLoading();
+      }
+      renderStats();
+      renderList();
+    }
+
+    // ── STATS ────────────────────────────────────────────────────────────────
+    function renderStats() {
+      const counts = { Open: 0, "In Progress": 0, Late: 0, Closed: 0 };
+      allActions.forEach(a => {
+        const s = computeEffectiveStatus(a.status, a.due_date);
+        if (counts[s] !== undefined) counts[s]++;
+      });
+      const total = allActions.length;
+      const defs = [
+        { key: "Open",        icon: "🔵", label: "Ouvertes"  },
+        { key: "In Progress", icon: "🟠", label: "En cours"  },
+        { key: "Late",        icon: "🔴", label: "En retard" },
+        { key: "Closed",      icon: "✅", label: "Clôturées" },
+      ];
+      document.getElementById("ma-stats-row").innerHTML = `
+        <div class="ma-stat-card ma-stat-total">
+          <div class="ma-stat-num">${total}</div>
+          <div class="ma-stat-lbl">Total</div>
+        </div>
+        ${defs.map(d => {
+          const cfg = getStatusCfg(d.key);
+          return `<div class="ma-stat-card" style="border-color:${cfg.color}44;background:${cfg.bg};">
+            <div class="ma-stat-num" style="color:${cfg.color};">${counts[d.key]}</div>
+            <div class="ma-stat-lbl" style="color:${cfg.color};">${d.icon} ${d.label}</div>
+          </div>`;
+        }).join("")}
+      `;
+    }
+
+    // ── FILTER ───────────────────────────────────────────────────────────────
+    document.getElementById("ma-tabs").addEventListener("click", e => {
+      const tab = e.target.closest(".ma-tab");
+      if (!tab) return;
+      document.querySelectorAll(".ma-tab").forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+      activeFilter = tab.dataset.filter;
+      renderList();
+    });
+
+    function filteredActions() {
+      if (activeFilter === "all") return allActions;
+      return allActions.filter(a =>
+        computeEffectiveStatus(a.status, a.due_date) === activeFilter
+      );
+    }
+
+    // ── RENDER LIST ──────────────────────────────────────────────────────────
+    function renderList() {
+      const list = document.getElementById("ma-list");
+      const data = filteredActions();
+      if (!data.length) {
+        list.innerHTML = `<div class="ma-empty">Aucune action pour ce filtre.</div>`;
+        return;
+      }
+      list.innerHTML = data.map(a => buildCard(a)).join("");
+      attachCardListeners(list, data);
+    }
+
+    function priorityBadge(p) {
+      const cls = { Low: "ca-priority-low", Medium: "ca-priority-medium", High: "ca-priority-high" };
+      return `<span class="ca-priority-badge ${cls[p] || ""}">${p}</span>`;
+    }
+
+    function buildCard(a) {
+      const eff = computeEffectiveStatus(a.status, a.due_date);
+      const cfg = getStatusCfg(eff);
+      const dueStr  = a.due_date  ? new Date(a.due_date).toLocaleDateString("fr-FR")  : "—";
+      const createdStr = a.date_created ? new Date(a.date_created).toLocaleDateString("fr-FR") : "—";
+      const closedStr  = a.date_closed  ? new Date(a.date_closed).toLocaleDateString("fr-FR")  : null;
+
+      const delayDays = (() => {
+        if (!a.date_closed || !a.due_date) return null;
+        const d = (new Date(a.date_closed) - new Date(a.due_date)) / 86400000;
+        return Math.round(d);
+      })();
+
+      const statusBadge = `<span class="ca-status-badge" style="background:${cfg.bg};color:${cfg.color};">${eff}</span>`;
+
+      const closureSection = eff === "Closed" ? `
+        <div class="ma-card-closure">
+          <div class="ma-closure-row">
+            <span class="ma-closure-label">✅ Clôturé le</span>
+            <span class="ma-closure-val">${closedStr || "—"} ${a.closed_by ? "par " + a.closed_by : ""}</span>
+          </div>
+          ${delayDays !== null ? `<div class="ma-closure-row">
+            <span class="ma-closure-label">Délai</span>
+            <span class="ma-closure-val" style="color:${delayDays > 0 ? "#ef4444" : "#10b981"}">
+              ${delayDays > 0 ? "+" + delayDays + " j retard" : delayDays === 0 ? "Dans les délais" : Math.abs(delayDays) + " j d'avance"}
+            </span>
+          </div>` : ""}
+          ${a.closure_comment ? `<div class="ma-closure-row"><span class="ma-closure-label">Commentaire</span><span class="ma-closure-val">${a.closure_comment}</span></div>` : ""}
+          ${a.closure_image_url ? `<div class="ma-closure-row"><span class="ma-closure-label">Preuve</span><a href="${a.closure_image_url}" target="_blank" class="ma-evidence-link">🖼️ Voir la preuve</a></div>` : ""}
+        </div>
+      ` : "";
+
+      const isMyAction = a.responsable && a.responsable.trim().toLowerCase() === username.trim().toLowerCase();
+      const actionButtons = eff !== "Closed" && isMyAction ? `
+        <div class="ma-card-actions">
+          ${eff !== "In Progress" ? `<button class="ma-btn-inprogress" data-id="${a.id}">▶ Marquer En cours</button>` : `<button class="ma-btn-inprogress disabled" disabled>▶ En cours</button>`}
+          <button class="ma-btn-close" data-id="${a.id}">✅ Clôturer</button>
+        </div>
+      ` : "";
+
+      return `
+        <div class="ma-card" data-id="${a.id}" style="border-left:4px solid ${cfg.color};">
+          <div class="ma-card-head">
+            <div class="ma-card-meta">
+              <span class="ma-audit-name">${a.audit_name || "—"}</span>
+              <span class="ma-zone">${[a.zone, a.sous_zone].filter(Boolean).join(" › ")}</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              ${priorityBadge(a.priority)}
+              ${statusBadge}
+            </div>
+          </div>
+          <div class="ma-card-question">${a.question}</div>
+          <div class="ma-card-body">
+            <div class="ma-info-row"><span class="ma-info-label">Action requise</span><span class="ma-info-val">${a.action_required}</span></div>
+            ${a.non_conformity_comment ? `<div class="ma-info-row"><span class="ma-info-label">Commentaire NC</span><span class="ma-info-val">${a.non_conformity_comment}</span></div>` : ""}
+            <div class="ma-info-row"><span class="ma-info-label">Responsable</span><span class="ma-info-val">${a.responsable}</span></div>
+            <div class="ma-info-row">
+              <span class="ma-info-label">Date limite</span>
+              <span class="ma-info-val" style="color:${cfg.color};font-weight:600;">${dueStr}</span>
+            </div>
+            <div class="ma-info-row"><span class="ma-info-label">Créée le</span><span class="ma-info-val">${createdStr} par ${a.created_by || "—"}</span></div>
+          </div>
+          ${closureSection}
+          ${actionButtons}
+        </div>
+      `;
+    }
+
+    function attachCardListeners(list, data) {
+      list.querySelectorAll(".ma-btn-inprogress:not(.disabled)").forEach(btn => {
+        btn.addEventListener("click", () => markInProgress(btn.dataset.id));
+      });
+      list.querySelectorAll(".ma-btn-close").forEach(btn => {
+        btn.addEventListener("click", () => openClosureModal(btn.dataset.id));
+      });
+    }
+
+    // ── IN PROGRESS ──────────────────────────────────────────────────────────
+    async function markInProgress(id) {
+      showLoading("Mise à jour…");
+      try {
+        await updateCorrectiveActionStatus(id, { status: "In Progress" });
+        const a = allActions.find(x => x.id === id);
+        if (a) a.status = "In Progress";
+        renderStats();
+        renderList();
+      } catch (e) {
+        alert("Erreur : " + e.message);
+      } finally {
+        hideLoading();
+      }
+    }
+
+    // ── CLOSURE MODAL ─────────────────────────────────────────────────────────
+    function openClosureModal(id) {
+      pendingClosureId = id;
+      document.getElementById("closure-date").value = new Date().toISOString().slice(0, 10);
+      document.getElementById("closure-modal-error").style.display = "none";
+      document.getElementById("closure-modal").style.display = "flex";
+    }
+
+    function closeClosureModal() {
+      document.getElementById("closure-modal").style.display = "none";
+      pendingClosureId = null;
+    }
+
+    document.getElementById("close-closure-modal").addEventListener("click", closeClosureModal);
+    document.getElementById("close-closure-modal-2").addEventListener("click", closeClosureModal);
+    document.getElementById("closure-modal").addEventListener("click", e => {
+      if (e.target.id === "closure-modal") closeClosureModal();
+    });
+
+    document.getElementById("closure-confirm-btn").addEventListener("click", async () => {
+      const dateVal = document.getElementById("closure-date").value;
+      const errEl   = document.getElementById("closure-modal-error");
+
+      if (!dateVal) {
+        errEl.textContent = "La date de clôture est obligatoire.";
+        errEl.style.display = "block";
+        return;
+      }
+      errEl.style.display = "none";
+
+      const btn = document.getElementById("closure-confirm-btn");
+      btn.disabled = true;
+      btn.textContent = "⏳ Clôture en cours…";
+      showLoading("Clôture de l'action…");
+
+      try {
+        await updateCorrectiveActionStatus(pendingClosureId, {
+          status:      "Closed",
+          date_closed: dateVal,
+          closed_by:   username,
+        });
+
+        const a = allActions.find(x => x.id === pendingClosureId);
+        if (a) {
+          a.status      = "Closed";
+          a.date_closed = dateVal;
+          a.closed_by   = username;
+        }
+
+        closeClosureModal();
+        renderStats();
+        renderList();
+      } catch (e) {
+        errEl.textContent = "Erreur : " + (e.message || e);
+        errEl.style.display = "block";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "✅ Confirmer la clôture";
+        hideLoading();
+      }
+    });
+
+    // ── REFRESH ──────────────────────────────────────────────────────────────
+    document.getElementById("ma-refresh-btn").addEventListener("click", loadActions);
+
+    // ── REPORTS ──────────────────────────────────────────────────────────────
+
+    function buildReportRows(actions) {
+      return actions.map(a => {
+        const eff     = computeEffectiveStatus(a.status, a.due_date);
+        const dueStr  = a.due_date     ? new Date(a.due_date).toLocaleDateString("fr-FR") : "—";
+        const createdStr = a.date_created ? new Date(a.date_created).toLocaleDateString("fr-FR") : "—";
+        const closedStr  = a.date_closed  ? new Date(a.date_closed).toLocaleDateString("fr-FR")  : "—";
+        const delay = (() => {
+          if (!a.date_closed || !a.due_date) return "—";
+          const d = Math.round((new Date(a.date_closed) - new Date(a.due_date)) / 86400000);
+          return d > 0 ? "+" + d + " j retard" : d === 0 ? "Dans délais" : Math.abs(d) + " j avance";
+        })();
+        return {
+          audit:       a.audit_name || "—",
+          zone:        [a.zone, a.sous_zone].filter(Boolean).join(" › ") || "—",
+          question:    a.question,
+          responsable: a.responsable,
+          action:      a.action_required,
+          priority:    a.priority,
+          status:      eff,
+          dueDate:     dueStr,
+          closedDate:  closedStr,
+          delay,
+          comment:     a.closure_comment || "—",
+        };
+      });
+    }
+
+    function generatePDFReport(actions, title) {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+
+      doc.setFontSize(16);
+      doc.setTextColor(30, 41, 59);
+      doc.text(title, 14, 18);
+      doc.setFontSize(9);
+      doc.setTextColor(100, 116, 139);
+      doc.text("Généré le " + new Date().toLocaleDateString("fr-FR"), 14, 26);
+
+      const rows = buildReportRows(actions);
+      doc.autoTable({
+        startY: 32,
+        head: [["Audit", "Zone", "Question", "Responsable", "Action", "Priorité", "Statut", "Échéance", "Clôture", "Délai", "Commentaire"]],
+        body: rows.map(r => [r.audit, r.zone, r.question, r.responsable, r.action, r.priority, r.status, r.dueDate, r.closedDate, r.delay, r.comment]),
+        headStyles: { fillColor: [16, 185, 129], fontSize: 7, textColor: 255, fontStyle: "bold" },
+        bodyStyles: { fontSize: 7 },
+        alternateRowStyles: { fillColor: [248, 250, 252] },
+        columnStyles: {
+          2: { cellWidth: 40 },
+          4: { cellWidth: 40 },
+          10: { cellWidth: 30 },
+        },
+        didDrawCell: (data) => {
+          if (data.section === "body" && data.column.index === 6) {
+            const cfg = getStatusCfg(data.cell.raw);
+            const [r, g, b] = hexToRgb(cfg.color);
+            doc.setTextColor(r, g, b);
+          }
+        },
+      });
+
+      const stamp = new Date().toISOString().slice(0,10);
+      doc.save(`Actions_Correctives_${title.replace(/\s+/g,"-")}_${stamp}.pdf`);
+    }
+
+    function hexToRgb(hex) {
+      const r = parseInt(hex.slice(1,3),16);
+      const g = parseInt(hex.slice(3,5),16);
+      const b = parseInt(hex.slice(5,7),16);
+      return [r,g,b];
+    }
+
+    function generateExcelReport(actions, filename) {
+      const rows = buildReportRows(actions);
+      const ws = XLSX.utils.json_to_sheet(rows.map(r => ({
+        "Audit":        r.audit,
+        "Zone":         r.zone,
+        "Question":     r.question,
+        "Responsable":  r.responsable,
+        "Action":       r.action,
+        "Priorité":     r.priority,
+        "Statut":       r.status,
+        "Date limite":  r.dueDate,
+        "Date clôture": r.closedDate,
+        "Délai":        r.delay,
+        "Commentaire":  r.comment,
+      })));
+      ws["!cols"] = [14,18,36,16,36,10,12,12,12,14,30].map(w => ({ wch: w }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Actions");
+      XLSX.writeFile(wb, filename + "_" + new Date().toISOString().slice(0,10) + ".xlsx");
+    }
+
+    document.getElementById("ma-pdf-open-btn").addEventListener("click", () => {
+      const open = allActions.filter(a => {
+        const s = computeEffectiveStatus(a.status, a.due_date);
+        return s !== "Closed";
+      });
+      if (!open.length) { alert("Aucune action ouverte."); return; }
+      generatePDFReport(open, "Actions Ouvertes");
+    });
+
+    document.getElementById("ma-pdf-closed-btn").addEventListener("click", () => {
+      const closed = allActions.filter(a => a.status === "Closed");
+      if (!closed.length) { alert("Aucune action clôturée."); return; }
+      generatePDFReport(closed, "Actions Clôturées");
+    });
+
+    document.getElementById("ma-xls-btn").addEventListener("click", () => {
+      if (!allActions.length) { alert("Aucune action."); return; }
+      generateExcelReport(allActions, "Actions_Correctives");
+    });
+
+    // ── INIT ─────────────────────────────────────────────────────────────────
+    await loadActions();
+  </script>
+</body>
+</html>
